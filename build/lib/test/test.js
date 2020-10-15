@@ -233,8 +233,6 @@ async function addTiAppProperties() {
 		content.push('\t\t\t\t<string>Requesting photo library write permission</string>');
 		content.push('\t\t\t\t<key>NSLocationWhenInUseUsageDescription</key>');
 		content.push('\t\t\t\t<string>Requesting location permission</string>');
-		content.push('\t\t\t\t<key>NSMicrophoneUsageDescription</key>');
-		content.push('\t\t\t\t<string>Requesting microphone permission</string>');
 
 		// Add a static shortcut.
 		content.push('\t\t\t\t<key>UIApplicationShortcutItems</key>');
