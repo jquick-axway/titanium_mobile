@@ -216,9 +216,9 @@ Local<FunctionTemplate> ${className}::getProxyTemplate(v8::Isolate* isolate)
 		Local<Value>(),
 		DEFAULT,
 	<#if property.set || proxyAttrs.propertyAccessors?seq_contains(name)>
-		static_cast<v8::PropertyAttribute>(v8::DontDelete)
+		static_cast<v8::PropertyAttribute>(v8::None)
 	<#else>
-		static_cast<v8::PropertyAttribute>(v8::ReadOnly | v8::DontDelete)
+		static_cast<v8::PropertyAttribute>(v8::ReadOnly)
 	</#if>
 	);
 	</@Proxy.listDynamicProperties>
