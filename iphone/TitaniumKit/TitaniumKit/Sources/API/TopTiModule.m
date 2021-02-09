@@ -13,6 +13,12 @@
 
 @implementation TopTiModule
 
+- (void)dealloc
+{
+  [jsBufferClass release];
+  [super dealloc];
+}
+
 - (NSString *)version
 {
   return @"__VERSION__";
@@ -49,6 +55,17 @@ READWRITE_IMPL(NSString *, userAgent, UserAgent);
 - (NSString *)apiName
 {
   return @"Ti";
+}
+
+- (JSValue *)Buffer
+{
+  if (!jsBufferClass) {
+    jsBufferClass = [JSValue valueWithObject: ^(NSDictionary *properties) {
+      return [self createBuffer:properties];
+    } inContext:[JSContext currentContext]];
+    [jsBufferClass retain];
+  }
+  return jsBufferClass;
 }
 
 - (JSValue *)createBuffer:(id)arg

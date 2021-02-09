@@ -27,26 +27,31 @@
   [super dealloc];
 }
 
-- (id)_initWithPageContext:(id<TiEvaluator>)context_ args:(NSArray *)args
+- (id)initWithJSConstructor:(JSValue *)jsProperties
 {
-  if (self = [self _initWithPageContext:context_]) {
-    ENSURE_SINGLE_ARG(args, NSDictionary);
-    NSDictionary *argDictionary = (NSDictionary *)args;
-    if (argDictionary[@"id"] == nil) {
-      NSLog(@"[ERROR] Ti.UI.ShortcutItem: The \"id\" property is required.");
-      return;
-    }
+  if (self = [self init]) {
+    @try {
+      id properties = [self JSValueToNative:jsProperties];
+      ENSURE_DICT(properties);
+      if (properties[@"id"] == nil) {
+        NSLog(@"[ERROR] Ti.UI.ShortcutItem: The \"id\" property is required.");
+        return;
+      }
 
-    if (argDictionary[@"title"] == nil) {
-      NSLog(@"[ERROR] Ti.UI.ShortcutItem: The \"title\" property is required.");
-      return;
-    }
+      if (properties[@"title"] == nil) {
+        NSLog(@"[ERROR] Ti.UI.ShortcutItem: The \"title\" property is required.");
+        return;
+      }
 
-    _shortcutItem = [[UIApplicationShortcutItem alloc] initWithType:argDictionary[@"id"]
-                                                     localizedTitle:argDictionary[@"title"]
-                                                  localizedSubtitle:argDictionary[@"description"]
-                                                               icon:[self findIcon:argDictionary[@"icon"]]
-                                                           userInfo:argDictionary[@"data"]];
+      _shortcutItem = [[UIApplicationShortcutItem alloc] initWithType:properties[@"id"]
+                                                       localizedTitle:properties[@"title"]
+                                                    localizedSubtitle:properties[@"description"]
+                                                                 icon:[self findIcon:properties[@"icon"]]
+                                                             userInfo:properties[@"data"]];
+    }
+    @catch (NSException *ex) {
+      [self currentContext].exception = [self NativeToJSValue:ex];
+    }
   }
   return self;
 }

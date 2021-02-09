@@ -20,7 +20,7 @@ describe.windowsMissing('Titanium.UI.NavigationWindow', function () {
 		nav = null;
 	});
 
-	it.iosBroken('Ti.UI.NavigationWindow', () => { // should this be defined?
+	it('Ti.UI.NavigationWindow', () => {
 		should(Ti.UI.NavigationWindow).not.be.undefined();
 	});
 

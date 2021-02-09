@@ -10,6 +10,7 @@
 @class KrollContext, KrollCallback, TiProxy;
 extern JSClassRef KrollObjectClassRef;
 extern JSStringRef kTiStringExportsKey;
+typedef JSValue*(^KrollJSCallback)(void);
 
 void KrollFinalizer(JSObjectRef ref);
 void KrollInitializer(JSContextRef ctx, JSObjectRef object);
@@ -25,6 +26,7 @@ bool KrollDeleteProperty(JSContextRef ctx, JSObjectRef object, JSStringRef prope
 @class KrollBridge;
 @interface KrollObject : NSObject {
   @private
+  NSMutableDictionary *innerClasses;
   NSMutableDictionary *properties;
   NSMutableDictionary *statics;
   JSObjectRef _jsobject;
@@ -34,13 +36,13 @@ bool KrollDeleteProperty(JSContextRef ctx, JSObjectRef object, JSStringRef prope
   @protected
   id target;
   KrollContext *context;
-  JSContextRef jsContext;
+  JSGlobalContextRef jsContext;
   KrollBridge *bridge; //Used only in finalizing for sake of safe lookup.
 }
 @property (nonatomic, assign) BOOL finalized;
 @property (nonatomic, readonly) KrollBridge *bridge;
 @property (nonatomic, readonly) KrollContext *context;
-@property (nonatomic, readonly) JSContextRef jsContext;
+@property (nonatomic, readonly) JSGlobalContextRef jsContext;
 
 - (id)initWithTarget:(id)target_ context:(KrollContext *)context_;
 
@@ -73,6 +75,10 @@ bool KrollDeleteProperty(JSContextRef ctx, JSObjectRef object, JSStringRef prope
  @param propertyName The property name to check for.
  */
 - (BOOL)hasProperty:(NSString *)propertyName;
+- (BOOL)hasPropertyInPrototype:(NSString *)propertyName;
+- (JSValue *)getInnerJSClassForApiName:(NSString *)name;
+- (KrollJSCallback)createJSCallbackForPropertyName:(NSString *)name isMethod:(BOOL)isMethod;
+- (JSValueRef)jsValueFrom:(id)nativeValue forKey:(NSString *)key;
 - (id)valueForKey:(NSString *)key;
 - (void)deleteKey:(NSString *)key;
 - (void)setValue:(id)value forKey:(NSString *)key;
@@ -91,6 +97,7 @@ bool KrollDeleteProperty(JSContextRef ctx, JSObjectRef object, JSStringRef prope
 
 - (void)noteKrollObject:(KrollObject *)value forKey:(NSString *)key;
 - (void)forgetKrollObjectforKey:(NSString *)key;
+- (void)noteObject:(JSValueRef)jsValue forKey:(NSString*)name isGetter:(BOOL)isGetter wrappingObject:(id)nativeObject;
 - (void)noteObject:(JSObjectRef)storedJSObject forTiString:(JSStringRef)keyString context:(JSContextRef)jsxContext;
 - (void)forgetObjectForTiString:(JSStringRef)keyString context:(JSContextRef)jsContext;
 - (JSObjectRef)objectForTiString:(JSStringRef)keyString context:(JSContextRef)jsContext;

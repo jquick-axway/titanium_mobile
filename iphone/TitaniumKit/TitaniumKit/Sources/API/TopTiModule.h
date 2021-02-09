@@ -14,11 +14,15 @@ READONLY_PROPERTY(NSString *, buildDate, BuildDate);
 READONLY_PROPERTY(NSString *, buildHash, BuildHash);
 PROPERTY(NSString *, userAgent, UserAgent);
 READONLY_PROPERTY(NSString *, version, Version);
+@property (readonly) JSValue *Buffer;
 
 // Methods
 - (JSValue *)createBuffer:(NSDictionary *)arg;
 
 @end
 
-@interface TopTiModule : ObjcModule <TiExports>
+@interface TopTiModule : ObjcModule <TiExports> {
+  @private
+  JSValue *jsBufferClass;
+}
 @end

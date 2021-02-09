@@ -76,12 +76,43 @@ id TiValueToId(KrollContext *context, JSValueRef v)
   return TiBindingTiValueToNSObject([context context], v);
 }
 
+/*!
+ * Converts given array of JSValue objects to an array of NSObjects.
+ * This method should be used to convert [JSContext currentArguments] when a proxy's method has been called.
+ * @param jsContext JavaScript context needed to read the given JSValue objects.
+ * @param jsArgs JSValue array received from JavaScript when a proxy's method has been called.
+ * @result Returns a new array of NSObject derived types. Returns nil if given an empty/nil array.
+ */
+NSArray *TiNativeArgsFromJSArgs(JSContext *jsContext, NSArray *jsArgs)
+{
+  NSMutableArray *nativeArgs = nil;
+  if (jsContext && jsArgs && ([jsArgs count] > 0)) {
+    nativeArgs = [[[NSMutableArray alloc] initWithCapacity:[jsArgs count]] autorelease];
+    for (JSValue *jsValue in jsArgs) {
+      id valueId = TiBindingTiValueToNSObject([jsContext JSGlobalContextRef], [jsValue JSValueRef]);
+      [nativeArgs addObject:(valueId ? valueId : [NSNull null])];
+    }
+  }
+  return nativeArgs;
+}
+
 //
 // function for converting a TiValue to an NSObject* (as ID)
 //
 JSValueRef ConvertIdTiValue(KrollContext *context, id obj)
 {
   return TiBindingTiValueFromNSObject([context context], obj);
+}
+
+BOOL IsKindOfTiProxy(Class class)
+{
+  Class tiProxyClass = [TiProxy class];
+  for (; class; class = class_getSuperclass(class)) {
+    if (class == tiProxyClass) {
+      return YES;
+    }
+  }
+  return NO;
 }
 
 //
@@ -170,6 +201,12 @@ bool KrollHasProperty(JSContextRef jsContext, JSObjectRef object, JSStringRef pr
 
   NSString *name = (NSString *)JSStringCopyCFString(kCFAllocatorDefault, propertyName);
   [name autorelease];
+
+  // Let prototype chain handle property detection if defined.
+  if ([o hasPropertyInPrototype:name]) {
+    return false;
+  }
+
   return [o hasProperty:name];
 }
 
@@ -202,50 +239,21 @@ JSValueRef KrollGetProperty(JSContextRef jsContext, JSObjectRef object, JSString
     NSString *name = (NSString *)JSStringCopyCFString(kCFAllocatorDefault, prop);
     [name autorelease];
 
-    id result = [o valueForKey:name];
-
-    if ([result isKindOfClass:[KrollWrapper class]]) {
-      if (![KrollBridge krollBridgeExists:[(KrollWrapper *)result bridge]]) {
-        //This remote object no longer exists.
-        [o deleteKey:name];
-        result = nil;
-      } else {
-        JSObjectRef cachedObject = [o objectForTiString:prop context:jsContext];
-        JSObjectRef remoteFunction = [(KrollWrapper *)result jsobject];
-        if ((cachedObject != NULL) && (cachedObject != remoteFunction)) {
-          [o forgetObjectForTiString:prop context:jsContext]; //Clean up the old property.
-        }
-        if (remoteFunction != NULL) {
-          [o noteObject:remoteFunction forTiString:prop context:jsContext];
-        }
-        return remoteFunction;
-      }
+    // Fetch given property from prototype chain if defined.
+    if ([o hasPropertyInPrototype:name]) {
+      return NULL;
     }
 
-    // TODO USe a marking protocol to skip when
-    if ([result conformsToProtocol:@protocol(JSExport)]) {
-      JSContext *objcContext = [JSContext contextWithJSGlobalContextRef:[[o context] context]];
-      return [[JSValue valueWithObject:result inContext:objcContext] JSValueRef];
-    }
-
-    JSValueRef jsResult = ConvertIdTiValue([o context], result);
-    if (([result isKindOfClass:[KrollObject class]] && ![result isKindOfClass:[KrollCallback class]] && [[result target] isKindOfClass:[TiProxy class]])
-        || [result isKindOfClass:[TiProxy class]]) {
-      [o noteObject:(JSObjectRef)jsResult forTiString:prop context:jsContext];
-    } else {
-      [o forgetObjectForTiString:prop context:jsContext];
-    }
-    if (result == nil) {
-      JSValueRef jsResult2 = [o jsvalueForUndefinedKey:name];
-      if (jsResult2 != NULL) {
-        jsResult = jsResult2;
-      }
-    }
-
+    // Fetch property value directory from proxy.
+    id nativeResult = [o valueForKey:name];
 #if KOBJECT_DEBUG == 1
     NSLog(@"[KROLL DEBUG] KROLL GET PROPERTY: %@=%@", name, result);
 #endif
-    return jsResult;
+
+    // Convert above result to a JS value and return it.
+    JSValueRef jsResultRef = [o jsValueFrom:nativeResult forKey:name];
+    [o noteObject:jsResultRef forKey:name isGetter:YES wrappingObject:nativeResult];
+    return jsResultRef;
   }
   @catch (NSException *ex) {
     *exception = [KrollObject toValue:[o context] value:ex];
@@ -271,15 +279,16 @@ bool KrollSetProperty(JSContextRef jsContext, JSObjectRef object, JSStringRef pr
     NSString *name = (NSString *)JSStringCopyCFString(kCFAllocatorDefault, prop);
     [name autorelease];
 
+    // Assign property via class' prototype chain if defined.
+    if ([o hasPropertyInPrototype:name]) {
+      return false;
+    }
+
     id v = TiValueToId([o context], value);
 #if KOBJECT_DEBUG == 1
     NSLog(@"[KROLL DEBUG] KROLL SET PROPERTY: %@=%@ against %@", name, v, o);
 #endif
-    if ([v isKindOfClass:[TiProxy class]]) {
-      [o noteObject:(JSObjectRef)value forTiString:prop context:jsContext];
-    } else {
-      [o forgetObjectForTiString:prop context:jsContext];
-    }
+    [o noteObject:value forKey:name isGetter:NO wrappingObject:v];
     TiThreadPerformOnMainThread(
         ^{
           [o setValue:v forKey:name];
@@ -459,6 +468,7 @@ bool KrollHasInstance(JSContextRef ctx, JSObjectRef constructor, JSValueRef poss
   RELEASE_TO_NIL(properties);
   RELEASE_TO_NIL(target);
   RELEASE_TO_NIL(statics);
+  RELEASE_TO_NIL(innerClasses);
   //	[[NSNotificationCenter defaultCenter] removeObserver:self name:UIApplicationDidReceiveMemoryWarningNotification object:nil];
   [super dealloc];
 }
@@ -677,16 +687,15 @@ bool KrollHasInstance(JSContextRef ctx, JSObjectRef constructor, JSValueRef poss
       if (result != nil) {
         return [self convertValueToDelegate:result forKey:key];
       }
-      // see if this is a create factory which we can do dynamically
-      if ([key hasPrefix:@"create"]) {
-        SEL selector = @selector(createProxy:forName:context:);
-        if ([target respondsToSelector:selector]) {
-          return [[[KrollMethod alloc] initWithTarget:target
-                                             selector:selector
-                                             argcount:2
-                                                 type:KrollMethodFactory
-                                                 name:key
-                                              context:[self context]] autorelease];
+
+      // Create and return a JS class constructor if referencing an inner class or create function.
+      // For example, "Window" or "createWindow" if this is a "Ti.UI" module.
+      JSValue *jsInnerClass = [self getInnerJSClassForApiName:key];
+      if (jsInnerClass) {
+        if ([key hasPrefix:@"create"] && [jsInnerClass hasProperty:@"_create"]) {
+          return jsInnerClass[@"_create"];
+        } else {
+          return jsInnerClass;
         }
       }
     } else {
@@ -780,6 +789,11 @@ bool KrollHasInstance(JSContextRef ctx, JSObjectRef constructor, JSValueRef poss
     return YES;
   }
 
+  // Check if name references an inner class or create function such as "Ti.UI.Window" or "Ti.UI.createWindow".
+  if ([self getInnerJSClassForApiName:propertyName]) {
+    return YES;
+  }
+
   if (([propertyName hasPrefix:@"get"] || [propertyName hasPrefix:@"set"]) && (propertyName.length >= 4) &&
       [NSCharacterSet.uppercaseLetterCharacterSet characterIsMember:[propertyName characterAtIndex:3]]) {
     return YES;
@@ -813,14 +827,388 @@ bool KrollHasInstance(JSContextRef ctx, JSObjectRef constructor, JSValueRef poss
     return YES;
   }
 
-  if ([propertyName hasPrefix:@"create"]) {
-    SEL selector = @selector(createProxy:forName:context:);
-    if ([target respondsToSelector:selector]) {
-      return YES;
+  return NO;
+}
+
+- (BOOL)hasPropertyInPrototype:(NSString *)propertyName
+{
+  // Fetch the proxy's prototype assigned to hidden a property.
+  JSContext *objcContext = [JSContext contextWithJSGlobalContextRef:[self jsContext]];
+  JSValue *jsThis = [JSValue valueWithJSValueRef:[self jsobject] inContext:objcContext];
+  JSValue *jsObject = objcContext[@"Object"];
+  JSValue *jsPrototype = [jsObject invokeMethod:@"getPrototypeOf" withArguments:@[jsThis]];
+  JSValue *jsProxyPrototype = jsPrototype[@"_tiProxyPrototype"];
+  if (![jsProxyPrototype isObject]) {
+    return NO;
+  }
+
+  // Check if given property is defined in proxy's prototype. (This does not check the chain.)
+  if ([jsProxyPrototype hasProperty:propertyName]) {
+    return YES;
+  }
+
+  // Check if property is defined in prototype chain. If not, then stop here.
+  if (![jsPrototype isObject] || ![jsPrototype hasProperty:propertyName]) {
+    return NO;
+  }
+
+  // Propert is defined by either a derived JS class or the base JS "Object" class.
+  // Define property in proxy's prototype in case it references an API that cannot be found via introspection
+  // such as "backgroundColor", "layout", etc. (These property are written to NSObject's dictionary.)
+  do {
+    NSArray *descriptorArgs = @[jsPrototype, propertyName];
+    JSValue *jsDescriptor = [jsObject invokeMethod:@"getOwnPropertyDescriptor" withArguments:descriptorArgs];
+    if ([jsDescriptor isObject]) {
+      KrollJSCallback callback = [self createJSCallbackForPropertyName:propertyName isMethod:NO];
+      if ([jsDescriptor hasProperty:@"value"]) {
+        [jsProxyPrototype defineProperty:propertyName descriptor:@{
+          JSPropertyDescriptorGetKey: callback,
+          JSPropertyDescriptorEnumerableKey: @NO,
+          JSPropertyDescriptorConfigurableKey: @YES
+        }];
+      } else {
+        [jsProxyPrototype defineProperty:propertyName descriptor:@{
+          JSPropertyDescriptorGetKey: callback,
+          JSPropertyDescriptorSetKey: callback,
+          JSPropertyDescriptorEnumerableKey: @NO,
+          JSPropertyDescriptorConfigurableKey: @YES
+        }];
+      }
+      break;
+    }
+    jsPrototype = [jsObject invokeMethod:@"getPrototypeOf" withArguments:@[jsPrototype]];
+  } while([jsPrototype isObject]);
+
+  // The property is defined in prototype chain.
+  return YES;
+}
+
+- (JSValue *)getInnerJSClassForApiName:(NSString *)name
+{
+  // Validate argument.
+  if (!name) {
+    return nil;
+  }
+
+  // Do not continue if this proxy is not a module derived class such as "Ti.UI".
+  // This method is only intended to fetch inner clases under a module such as "Ti.UI.Window", "Ti.UI.View", etc.
+  if (![target isKindOfClass:[TiModule class]]) {
+    return nil;
+  }
+
+  // Do not continue unless API name starts with "create*" or an uppercase letter.
+  // This is an optimization. Avoids introspection when given lowercase property names.
+  NSString *createPrefix = @"create";
+  BOOL isCreateFunction = [name hasPrefix:createPrefix];
+  if (!isCreateFunction && ![[NSCharacterSet uppercaseLetterCharacterSet] characterIsMember:[name characterAtIndex:0]]) {
+    return nil;
+  }
+
+  // Fetch the potential class name from the API name.
+  NSString *innerClassName;
+  if (isCreateFunction) {
+    innerClassName = [name substringFromIndex:createPrefix.length];
+  } else {
+    innerClassName = name;
+  }
+
+  // If this method has already defined a JS class constructor for the given API name, then return it.
+  JSValue *jsConstructor = innerClasses ? innerClasses[innerClassName] : nil;
+  if (jsConstructor) {
+    return jsConstructor;
+  }
+
+  // Fetch the native class type for the given API name from module.
+  // Will return nil if API does not reference an inner class.
+  Class proxyClass = [target getProxyClassForApiName:innerClassName];
+  if (!proxyClass) {
+    return nil;
+  }
+
+  // If inner class implements the "JSExport", then JavaScriptCore will define its constructor and properties for us.
+  JSContext *objcContext = [JSContext contextWithJSGlobalContextRef:jsContext];
+  if ([proxyClass conformsToProtocol:@protocol(JSExport)]) {
+    jsConstructor = [JSValue valueWithObject:proxyClass inContext:objcContext];
+    jsConstructor[@"_create"] = ^() {
+      // The module's create<Proxy>() method for this inner class was called.
+      return [jsConstructor constructWithArguments:[JSContext currentArguments]];
+    };
+    innerClasses = innerClasses ? innerClasses : [[NSMutableDictionary alloc] initWithCapacity:16];
+    innerClasses[innerClassName] = jsConstructor;
+    return jsConstructor;
+  }
+
+  // Create a JS constructor used to create a native proxy instance.
+  jsConstructor = [JSValue valueWithObject: [[^() {
+    // The construct or create function was called.
+    // Create a native proxy instance with the given JS arguments.
+    JSContext *currentContext = [JSContext currentContext];
+    @try {
+      NSArray *args = TiNativeArgsFromJSArgs(currentContext, [JSContext currentArguments]);
+      id proxy = [target createProxy:args forName:innerClassName context:[self bridge]];
+      if (proxy && [proxy isKindOfClass:[TiProxy class]]) {
+        JSObjectRef jsProxyRef = [[proxy krollObjectForContext:context] jsobject];
+        JSValueRef jsPrototypeRef = [innerClasses[innerClassName][@"prototype"] JSValueRef];
+        JSObjectSetPrototype(jsContext, jsProxyRef, jsPrototypeRef);
+        return [JSValue valueWithJSValueRef:jsProxyRef inContext:currentContext];
+      }
+    }
+    @catch (NSException *ex) {
+      JSValueRef jsExceptionRef = TiBindingTiValueFromNSObject(jsContext, ex);
+      currentContext.exception = [JSValue valueWithJSValueRef:jsExceptionRef inContext:currentContext];
+    }
+    return [JSValue valueWithNullInContext:currentContext];
+  } copy] autorelease] inContext:objcContext];
+
+  // Create method/property name collections.
+  NSMutableSet *methodNameSet = [[NSMutableSet alloc] initWithCapacity:256];
+  NSMutableSet *getterPropertyNameSet = [[NSMutableSet alloc] initWithCapacity:256];
+  NSMutableSet *setterPropertyNameSet = [[NSMutableSet alloc] initWithCapacity:256];
+
+  // Fetch all methods and properties from the proxy class and its super classes.
+  for (Class nextClass = proxyClass; IsKindOfTiProxy(nextClass); nextClass = class_getSuperclass(nextClass)) {
+    // Traverse all proxy methods.
+    unsigned int methodCount = 0;
+    Method *methodArray = class_copyMethodList(nextClass, &methodCount);
+    for (unsigned int index = 0; index < methodCount; index++) {
+      // Fetch the next native method name from proxy.
+      Method method = methodArray[index];
+      NSString *methodName = [NSString stringWithUTF8String:sel_getName(method_getName(method))];
+      if (!methodName) {
+        continue;
+      }
+
+      // Check if method has any aguments.
+      if (([methodName characterAtIndex:[methodName length] - 1]) == ':') {
+        // Only define method in JS class if:
+        // - It has only 1 argument.
+        // - It has only 2 arguemnts where 2nd arg is named "withObject". Ex: Ti.UI.ScrollView.setContentOffset()
+        NSRange range;
+        range.location = 0;
+        range.length = [methodName length] - 1;
+        methodName = [methodName substringWithRange:range];
+        if ([methodName hasPrefix:@"set"] && [methodName hasSuffix:@":withObject"]) {
+          methodName = [methodName substringToIndex:(methodName.length - @":withObject".length)];
+        }
+        if ([methodName containsString:@":"]) {
+          continue;
+        }
+        [methodNameSet addObject:methodName];
+      } else {
+        // A method without arguments and with a return type should be defined as a getter property.
+        // If it's a getter, we must add a setter since proxy's target class might have a "set<Property>_()" method.
+        char *typeName = method_copyReturnType(method);
+        bool isVoid = (!typeName || ((typeName[0] == _C_VOID) && (typeName[1] == '\0')));
+        if (!isVoid) {
+          [getterPropertyNameSet addObject:methodName];
+          if (![methodName isEqualToString:@"apiName"]) {
+            [setterPropertyNameSet addObject:methodName];
+          }
+        }
+        free(typeName);
+      }
+
+      // If this is a "get*()" or "set*()" method, then add an equivalent property name for it.
+      if (methodName.length > 3) {
+        if ([methodName hasPrefix:@"get"]) {
+          [getterPropertyNameSet addObject:[self _propertyGetterSetterKey:methodName]];
+        } else if ([methodName hasPrefix:@"set"]) {
+          [setterPropertyNameSet addObject:[self _propertyGetterSetterKey:methodName]];
+        }
+      }
+    }
+    free(methodArray);
+    methodArray = NULL;
+
+    // Traverse all proxy properties.
+    unsigned int propertyCount = 0;
+    objc_property_t *propertyArray = class_copyPropertyList(nextClass, &propertyCount);
+    for (unsigned int index = 0; index < propertyCount; index++) {
+      // Fetch the next property name.
+      objc_property_t property = propertyArray[index];
+      NSString *propertyName = [NSString stringWithUTF8String:property_getName(property)];
+      if (!propertyName) {
+        continue;
+      }
+
+      // Add property getter to collection. (Objective-C and Swift do not support write-only properties.)
+      [getterPropertyNameSet addObject:propertyName];
+
+      // If native property is not flagged read-only, then define a JS property setter for it.
+      char *readOnlyString = property_copyAttributeValue(property, "R");
+      if (readOnlyString) {
+        free(readOnlyString);
+      } else {
+        [setterPropertyNameSet addObject:propertyName];
+      }
+    }
+    free(propertyArray);
+    propertyArray = NULL;
+  }
+
+  // Create a "prototype" object and add it to the JS class constructor.
+  JSValue *jsPrototype = jsConstructor[@"prototype"];
+
+  // Add hidden property storing this prototype instance.
+  [jsPrototype defineProperty:@"_tiProxyPrototype" descriptor:@{
+    JSPropertyDescriptorValueKey: jsPrototype,
+    JSPropertyDescriptorEnumerableKey: @NO,
+    JSPropertyDescriptorWritableKey: @NO,
+    JSPropertyDescriptorConfigurableKey: @NO
+  }];
+
+  // Add constructor to prototype.
+  [jsPrototype defineProperty:@"constructor" descriptor:@{
+    JSPropertyDescriptorValueKey: jsConstructor,
+    JSPropertyDescriptorEnumerableKey: @NO,
+    JSPropertyDescriptorWritableKey: @NO,
+    JSPropertyDescriptorConfigurableKey: @NO
+  }];
+
+  // Add proxy methods to prototype.
+  for (NSString *methodName in methodNameSet) {
+    [jsPrototype defineProperty:methodName descriptor:@{
+      JSPropertyDescriptorValueKey: [self createJSCallbackForPropertyName:methodName isMethod:YES],
+      JSPropertyDescriptorEnumerableKey: @NO,
+      JSPropertyDescriptorWritableKey: @NO,
+      JSPropertyDescriptorConfigurableKey: @YES
+    }];
+  }
+
+  // Add proxy getter/setter properties to prototype.
+  for (NSString *propertyName in getterPropertyNameSet) {
+    KrollJSCallback callback = [self createJSCallbackForPropertyName:propertyName isMethod:NO];
+    BOOL hasSetter = [setterPropertyNameSet containsObject:propertyName];
+    if (hasSetter) {
+      [jsPrototype defineProperty:propertyName descriptor:@{
+        JSPropertyDescriptorGetKey: callback,
+        JSPropertyDescriptorSetKey: callback,
+        JSPropertyDescriptorEnumerableKey: @NO,
+        JSPropertyDescriptorConfigurableKey: @YES
+      }];
+    } else {
+      [jsPrototype defineProperty:propertyName descriptor:@{
+        JSPropertyDescriptorGetKey: callback,
+        JSPropertyDescriptorEnumerableKey: @NO,
+        JSPropertyDescriptorConfigurableKey: @YES
+      }];
     }
   }
 
-  return NO;
+  // Assign prototype to JS constructor object.
+  JSObjectRef jsConstructorRef = JSValueToObject(jsContext, [jsConstructor JSValueRef], NULL);
+  JSObjectSetPrototype(jsContext, jsConstructorRef, [jsPrototype JSValueRef]);
+
+  // Release method/property name collections.
+  [methodNameSet release];
+  [getterPropertyNameSet release];
+  [setterPropertyNameSet release];
+
+  // Add inner class constructor to dictionary for fast access later.
+  innerClasses = innerClasses ? innerClasses : [[NSMutableDictionary alloc] initWithCapacity:16];
+  innerClasses[innerClassName] = jsConstructor;
+
+  return jsConstructor;
+}
+
+- (KrollJSCallback)createJSCallbackForPropertyName:(NSString *)name isMethod:(BOOL)isMethod
+{
+  if (!name) {
+    return nil;
+  }
+
+  KrollJSCallback callback = ^(){
+    // Fetch the KrollObject assigned to the JS object being accessed.
+    JSContext *currentContext = [JSContext currentContext];
+    JSValue *thisValue = [JSContext currentThis];
+    JSObjectRef thisObject = thisValue ? JSValueToObject(jsContext, [thisValue JSValueRef], NULL) : NULL;
+    id privateObject = thisObject ? (id)JSObjectGetPrivate(thisObject) : nil;
+    if (!privateObject || ![privateObject isKindOfClass:[KrollObject class]]) {
+      return [JSValue valueWithUndefinedInContext:currentContext];
+    }
+
+    // Read the proxy's property or invoke its callback.
+    @try {
+      // Fetch method arguments or setter value, if applicable.
+      NSArray *jsArgsArray = [JSContext currentArguments];
+      NSArray *nativeArgsArray = TiNativeArgsFromJSArgs(currentContext, jsArgsArray);
+
+      // Handle the property.
+      if (!isMethod && nativeArgsArray && ([nativeArgsArray count] >= 1)) {
+        // This is a setter property. Write argument to property.
+        JSValueRef jsValueRef = [[jsArgsArray firstObject] JSValueRef];
+        id nativeValue = [nativeArgsArray firstObject];
+        [privateObject noteObject:jsValueRef forKey:name isGetter:NO wrappingObject:nativeValue];
+        TiThreadPerformOnMainThread(^{ [privateObject setValue:nativeValue forKey:name]; }, YES);
+      } else {
+        // This is a getter property or method. Fetch the property's value/callback.
+        id nativeValue = [privateObject valueForKey:name];
+
+        // If a callback was returned, then invoke it immediately and replace above result.
+        if (isMethod && nativeValue && [nativeValue isKindOfClass:[KrollMethod class]]) {
+          nativeValue = [nativeValue call:nativeArgsArray];
+        }
+
+        // Return the property/method's result if provided.
+        // Note: To return null to JavaScript, the above must return an [NSNull null] object.
+        JSValueRef jsValueRef = [privateObject jsValueFrom:nativeValue forKey:name];
+        [privateObject noteObject:jsValueRef forKey:name isGetter:YES wrappingObject:nativeValue];
+        if (jsValueRef) {
+          return [JSValue valueWithJSValueRef:jsValueRef inContext:currentContext];
+        }
+      }
+    }
+    @catch (NSException *ex) {
+      // Throw the native exception as a JS exception.
+      JSValueRef jsExceptionRef = TiBindingTiValueFromNSObject([currentContext JSGlobalContextRef], ex);
+      currentContext.exception = [JSValue valueWithJSValueRef:jsExceptionRef inContext:currentContext];
+    }
+
+    // Return undefined if a result was not returned or an exception was thrown.
+    return [JSValue valueWithUndefinedInContext:currentContext];
+  };
+  return [[callback copy] autorelease];
+}
+
+- (JSValueRef)jsValueFrom:(id)nativeValue forKey:(NSString *)key
+{
+  // Fetch the JS context.
+  JSContext *objcContext = [JSContext contextWithJSGlobalContextRef:jsContext];
+
+  // If given a JSValue, then return it as-is.
+  // Note: This happens for inner classes and create functions such as Ti.UI.Window and Ti.UI.createWindow().
+  if ([nativeValue isKindOfClass:[JSValue class]]) {
+    return [nativeValue JSValueRef];
+  }
+
+  // Native classes implementing JSExport will be automatically convertd to JS classes/instances for us.
+  if ([nativeValue conformsToProtocol:@protocol(JSExport)]) {
+    return [[JSValue valueWithObject:nativeValue inContext:objcContext] JSValueRef];
+  }
+
+  // Handling natively wrapped objects such as JS listeners.
+  if ([nativeValue isKindOfClass:[KrollWrapper class]]) {
+    if (![KrollBridge krollBridgeExists:[(KrollWrapper *)nativeValue bridge]]) {
+      //This remote object no longer exists.
+      [self deleteKey:key];
+      nativeValue = nil;
+    } else {
+      return [(KrollWrapper *)nativeValue jsobject];
+    }
+  }
+
+  // The value is likely a primitive type or proxy instance. Get its JS value equivalent.
+  JSValueRef jsValueRef = TiBindingTiValueFromNSObject(jsContext, nativeValue);
+  if (!nativeValue) {
+    JSValueRef jsValueForUndefinedRef = [self jsvalueForUndefinedKey:key];
+    if (!jsValueForUndefinedRef) {
+      jsValueRef = jsValueForUndefinedRef;
+    }
+  }
+  if (!jsValueRef) {
+    jsValueRef = JSValueMakeUndefined(jsContext);
+  }
+  return jsValueRef;
 }
 
 - (id)valueForKey:(NSString *)key
@@ -1084,13 +1472,49 @@ TI_INLINE JSStringRef TiStringCreateWithPointerValue(int value)
   JSStringRelease(nameRef);
 }
 
-- (void)noteObject:(JSObjectRef)storedJSObject forTiString:(JSStringRef)keyString context:(JSContextRef)jsContextRef
+- (void)noteObject:(JSValueRef)jsValueRef forKey:(NSString*)name isGetter:(BOOL)isGetter wrappingObject:(id)nativeObject
 {
-  if ((self.propsObject == NULL) || (storedJSObject == NULL) || finalized) {
+  if ((self.propsObject == NULL) || finalized || !name) {
     return;
   }
-  JSValueRef exception = NULL;
 
+  BOOL shouldNote = NO;
+  if (nativeObject && jsValueRef && JSValueIsObject([self jsContext], jsValueRef)) {
+    if ([nativeObject isKindOfClass:[TiProxy class]]) {
+      shouldNote = YES;
+    } else if (isGetter) {
+      if ([nativeObject isKindOfClass:[KrollWrapper class]]) {
+        shouldNote = YES;
+      } else if ([nativeObject isKindOfClass:[KrollObject class]]
+                 && ![nativeObject isKindOfClass:[KrollCallback class]]
+                 && [[nativeObject target] isKindOfClass:[TiProxy class]]) {
+        shouldNote = YES;
+      }
+    }
+  }
+
+  JSStringRef jsNameRef = JSStringCreateWithCFString((CFStringRef)name);
+  if (shouldNote) {
+    JSObjectRef jsObjectRef = JSValueToObject([self jsContext], jsValueRef, NULL);
+    [self noteObject:jsObjectRef forTiString:jsNameRef context:[self jsContext]];
+  } else {
+    [self forgetObjectForTiString:jsNameRef context:[self jsContext]];
+  }
+  JSStringRelease(jsNameRef);
+}
+
+- (void)noteObject:(JSObjectRef)storedJSObject forTiString:(JSStringRef)keyString context:(JSContextRef)jsContextRef
+{
+  if ((self.propsObject == NULL) || finalized) {
+    return;
+  }
+
+  if (storedJSObject == NULL) {
+    [self forgetObjectForTiString:keyString context:jsContextRef];
+    return;
+  }
+
+  JSValueRef exception = NULL;
   JSObjectRef jsProxyHash = (JSObjectRef)JSObjectGetProperty(jsContextRef, self.propsObject, kTiStringPropertyKey, &exception);
 
   if ((jsProxyHash == NULL) || (JSValueGetType(jsContextRef, jsProxyHash) != kJSTypeObject)) {

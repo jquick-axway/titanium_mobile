@@ -27,6 +27,7 @@
 - (void)_setName:(NSString *)name;
 - (void)setPageContext:(id<TiEvaluator>)evaluator;
 - (void)setHost:(TiHost *)host;
+- (Class)getProxyClassForApiName:(NSString *)name;
 - (id)createProxy:(NSArray *)args forName:(NSString *)name context:(id<TiEvaluator>)evaluator;
 
 // module related utilities

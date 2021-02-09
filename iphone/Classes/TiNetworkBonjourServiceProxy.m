@@ -31,6 +31,41 @@
   return self;
 }
 
+- (id)initWithJSConstructor:(JSValue *)jsProperties
+{
+  if (self = [self init]) {
+    @try {
+      id properties = [self JSValueToNative:jsProperties];
+      ENSURE_TYPE_OR_NIL(properties, NSDictionary);
+
+      id value = [properties objectForKey:@"domain"];
+      if (value) {
+        self.domain = value;
+      }
+      value = [properties objectForKey:@"isLocal"];
+      if (value) {
+        self.isLocal = value;
+      }
+      value = [properties objectForKey:@"name"];
+      if (value) {
+        self.name = value;
+      }
+      value = [properties objectForKey:@"socket"];
+      if (value) {
+        self.socket = [self NativeToJSValue:value];
+      }
+      value = [properties objectForKey:@"type"];
+      if (value) {
+        self.type = value;
+      }
+    }
+    @catch (NSException *ex) {
+      [self currentContext].exception = [self NativeToJSValue:ex];
+    }
+  }
+  return self;
+}
+
 - (id)initWithContext:(id<TiEvaluator>)context_ service:(NSNetService *)service_ local:(bool)local_
 {
   if (self = [super _initWithPageContext:context_]) {

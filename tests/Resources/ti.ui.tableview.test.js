@@ -31,7 +31,7 @@ describe('Titanium.UI.TableView', function () {
 		}
 	});
 
-	it.iosBroken('Ti.UI.TableView', () => { // should this be defined?
+	it('Ti.UI.TableView', () => {
 		should(Ti.UI.TableView).not.be.undefined();
 	});
 

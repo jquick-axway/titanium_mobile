@@ -10,6 +10,7 @@
 NS_ASSUME_NONNULL_BEGIN
 @protocol TiUIShortcutItemProxyExports <JSExport>
 
+- (id)initWithJSConstructor:(JSValue *)jsProperties;
 READONLY_PROPERTY(NSString *, title, Title);
 READONLY_PROPERTY(NSString *, description, Description);
 READONLY_PROPERTY(NSDictionary *, data, Data);

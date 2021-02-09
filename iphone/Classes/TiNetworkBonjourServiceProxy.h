@@ -24,6 +24,7 @@ PROPERTY(JSValue *, socket, Socket);
 PROPERTY(NSString *, type, Type);
 
 // Methods
+- (id)initWithJSConstructor:(JSValue *)jsProperties;
 // FIXME: socketProxy can be TiNetworkSocketTCPProxy* once that proxy is moved to obj-c api
 JSExportAs(publish,
            -(void)publish

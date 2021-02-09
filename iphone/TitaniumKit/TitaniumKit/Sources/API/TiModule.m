@@ -135,17 +135,14 @@
   moduleName = [name_ retain];
 }
 
-//
-// we dynamically create proxies so we don't create an unnecessary
-// compile-time dependency on our sub module classes
-//
-- (id)createProxy:(NSArray *)args forName:(NSString *)name context:(id<TiEvaluator>)context
+- (id)getProxyClassForApiName:(NSString *)name
 {
-  Class resultClass = (Class)CFDictionaryGetValue(classNameLookup, name);
-  if (resultClass == NULL) {
-    NSRange range = [name rangeOfString:@"create"];
-    if (range.location == NSNotFound) {
-      return nil;
+  Class resultClass = NULL;
+  Boolean hasEntry = CFDictionaryGetValueIfPresent(classNameLookup, name, (const void **)&resultClass);
+  if (!hasEntry) {
+    NSString *normalizedName = name;
+    if ([name hasPrefix:@"create"]) {
+      normalizedName = [name substringFromIndex:6];
     }
 
     // this is a magic check to see if we're inside a compiled code or not
@@ -160,17 +157,29 @@
       prefix = @"";
     }
     moduleName_ = [moduleName_ stringByReplacingOccurrencesOfString:@"Module" withString:@""];
-    NSString *className = [NSString stringWithFormat:@"%@%@%@Proxy", prefix, moduleName_, [name substringFromIndex:range.location + 6]];
+    NSString *className = [NSString stringWithFormat:@"%@%@%@Proxy", prefix, moduleName_, normalizedName];
     resultClass = NSClassFromString(className);
-    if (resultClass == nil) {
-      DebugLog(@"[WARN] Attempted to load %@: Could not find class definition.", className);
-      @throw [NSException exceptionWithName:@"org.appcelerator.module"
-                                     reason:[NSString stringWithFormat:@"invalid method (%@) passed to %@", name, [self class]]
-                                   userInfo:nil];
-    }
     CFDictionarySetValue(classNameLookup, name, resultClass);
+    if (name != normalizedName) {
+      CFDictionarySetValue(classNameLookup, normalizedName, resultClass);
+    }
   }
+  return resultClass;
+}
 
+//
+// we dynamically create proxies so we don't create an unnecessary
+// compile-time dependency on our sub module classes
+//
+- (id)createProxy:(NSArray *)args forName:(NSString *)name context:(id<TiEvaluator>)context
+{
+  Class resultClass = [self getProxyClassForApiName:name];
+  if (resultClass == nil) {
+    DebugLog(@"[WARN] Attempted to load %@: Could not find class definition.", name);
+    @throw [NSException exceptionWithName:@"org.appcelerator.module"
+                                   reason:[NSString stringWithFormat:@"invalid api (%@) passed to %@", name, [self class]]
+                                 userInfo:nil];
+  }
   return [[[resultClass alloc] _initWithPageContext:context args:args] autorelease];
 }
 

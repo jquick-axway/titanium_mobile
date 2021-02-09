@@ -26,7 +26,7 @@ describe.windowsMissing('Titanium.UI.MaskedImage', function () {
 		}
 	});
 
-	it.iosBroken('Ti.UI.MaskedImage', () => { // should this be defined?
+	it('Ti.UI.MaskedImage', () => {
 		should(Ti.UI.MaskedImage).not.be.undefined();
 	});
 

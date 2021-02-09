@@ -11,7 +11,7 @@
 const should = require('./utilities/assertions');
 
 describe('Titanium.UI.Switch', function () {
-	it.iosBroken('Ti.UI.Switch', function () { // should this be defined?
+	it('Ti.UI.Switch', () => {
 		should(Ti.UI.Switch).not.be.undefined();
 	});
 
